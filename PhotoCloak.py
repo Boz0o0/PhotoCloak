@@ -12,6 +12,7 @@ import io
 import rembg
 from segment_anything import sam_model_registry, SamPredictor
 from ultralytics import YOLO
+import piexif
 
 # Initialize YOLO model once
 yolo_model = YOLO("yolov8n.pt")
@@ -518,9 +519,20 @@ def apply_adversarial_perturbation(image, strength=0.2):
 def metadata_cleaner(output_path):
     """
     Adds random EXIF metadata to the image while preserving existing metadata.
+    Only works with JPEG images.
     """
     try:
-        import piexif
+        if not output_path.lower().endswith(('.jpg', '.jpeg')):
+            print(f"Note: Skipping metadata for non-JPEG file: {output_path}")
+            return
+        try:
+            with Image.open(output_path) as img:
+                if img.format not in ('JPEG', 'JPG'):
+                    print(f"Note: File {output_path} is {img.format}, which may not support EXIF")
+        except Exception as e:
+            print(f"Warning: Cannot verify image format for {output_path}: {e}")
+            return
+
         lat, lng = 47.750839 + rand.uniform(-0.005, 0.005), 7.335888 + rand.uniform(-0.005, 0.005)
         date_str = datetime.datetime.now().strftime("%Y:%m:%d %H:%M:%S")
         exif_dict = {
@@ -538,9 +550,21 @@ def metadata_cleaner(output_path):
                 piexif.GPSIFD.GPSLongitude: [(int(lng), 1), (int((lng % 1) * 60), 1), (int(((lng * 60) % 1) * 60), 100)],
             },
         }
-        piexif.insert(piexif.dump(exif_dict), output_path)
+        
+        try:
+            piexif.insert(piexif.dump(exif_dict), output_path)
+        except piexif.InvalidImageDataError:
+            try:
+                with Image.open(output_path) as img:
+                    exif_bytes = piexif.dump(exif_dict)
+                    img.save(output_path, exif=exif_bytes)
+            except Exception as e:
+                print(f"Warning: Could not add EXIF metadata to {output_path}: {e}")
+    
     except ImportError:
         print("Warning: piexif not installed. Skipping metadata.")
+    except Exception as e:
+        print(f"Error in metadata processing: {e}")
 
 def process_image(filename, input_folder, output_folder, strength):
     """
