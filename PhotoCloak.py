@@ -13,6 +13,10 @@ import rembg
 from segment_anything import sam_model_registry, SamPredictor
 from ultralytics import YOLO
 import piexif
+import insightface
+from insightface.app import FaceAnalysis
+import glob
+import random
 
 # Initialize YOLO model once
 yolo_model = YOLO("yolov8n.pt")
@@ -177,6 +181,101 @@ def detect_subject_mediapipe(image):
         refined_mask = guided_filter_refinement(image, binary_mask)
         
         return refined_mask
+
+def setup_face_swapper():
+    """
+    Initialize the InsightFace face swapper using local models directory
+    """
+    try:
+        face_analyzer = FaceAnalysis(name="buffalo_l", providers=['CPUExecutionProvider'])
+        face_analyzer.prepare(ctx_id=0, det_size=(640, 640))
+
+        local_model_path = os.path.join('models', 'inswapper_128.onnx')
+
+        if not os.path.exists(local_model_path):
+            print(f"Model not found in local models folder. Checking default location.")
+            local_model_path = os.path.expanduser('~/.insightface/models/inswapper_128.onnx')
+
+        if not os.path.exists(local_model_path):
+            print("=" * 80)
+            print("FACE SWAP MODEL NOT FOUND")
+            print("Please download the model manually:")
+            print("1. Download inswapper_128.onnx from: https://huggingface.co/deepinsight/inswapper/resolve/main/inswapper_128.onnx")
+            print(f"2. Save it to: {os.path.abspath('models/inswapper_128.onnx')}")
+            print("3. Run the program again")
+            print("=" * 80)
+            return None, None
+
+        print(f"Using face swap model at: {local_model_path}")
+        face_swapper = insightface.model_zoo.get_model(local_model_path, providers=['CPUExecutionProvider'])
+        return face_analyzer, face_swapper
+    except Exception as e:
+        print(f"Warning: Failed to initialize face swapper: {e}")
+        print("Face swapping will be skipped.")
+        return None, None
+
+def apply_face_swap(image, faces_folder, face_index=-1, blend_ratio=1.0):
+    """
+    Apply face swapping using InsightFace.
+    
+    Args:
+        image: Input image to apply face swap to
+        faces_folder: Folder containing source faces for swapping
+        face_index: Index of face to use (-1 for random selection)
+        blend_ratio: Blend ratio between original and swapped face (0.0-1.0)
+    
+    Returns:
+        Image with faces swapped
+    """
+    global face_analyzer, face_swapper
+    
+    if 'face_analyzer' not in globals() or 'face_swapper' not in globals():
+        face_analyzer, face_swapper = setup_face_swapper()
+
+    if face_analyzer is None or face_swapper is None:
+        print("Face swapping not available. Skipping.")
+        return image
+
+    rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    input_faces = face_analyzer.get(rgb_image)
+    if len(input_faces) == 0:
+        print("No faces detected in input image. Skipping face swap.")
+        return image
+
+    source_face_paths = glob.glob(os.path.join(faces_folder, '*.jpg')) + \
+                       glob.glob(os.path.join(faces_folder, '*.jpeg')) + \
+                       glob.glob(os.path.join(faces_folder, '*.png'))
+
+    if not source_face_paths:
+        print(f"No face images found in {faces_folder}. Skipping face swap.")
+        return image
+
+    if face_index < 0 or face_index >= len(source_face_paths):
+        source_face_path = random.choice(source_face_paths)
+    else:
+        source_face_path = source_face_paths[face_index]
+
+    source_img = cv2.imread(source_face_path)
+    source_img_rgb = cv2.cvtColor(source_img, cv2.COLOR_BGR2RGB)
+    source_faces = face_analyzer.get(source_img_rgb)
+
+    if len(source_faces) == 0:
+        print(f"No face detected in source image {source_face_path}. Skipping face swap.")
+        return image
+
+    source_face = source_faces[0]
+    result_img = rgb_image.copy()
+
+    for input_face in input_faces:
+        result_img = face_swapper.get(result_img, input_face, source_face, paste_back=True)
+
+    result_img = cv2.cvtColor(result_img, cv2.COLOR_RGB2BGR)
+
+    if blend_ratio < 1.0:
+        result_img = cv2.addWeighted(image, 1.0 - blend_ratio, result_img, blend_ratio, 0)
+
+    return result_img
 
 # --------- BASIC IMAGE PERTURBATION FUNCTIONS ---------
 
@@ -495,10 +594,14 @@ def apply_background_focused_perturbation(image, strength_subject=0.01, strength
     
     return result.astype(np.uint8)
 
-def apply_adversarial_perturbation(image, strength=0.2):
+def apply_adversarial_perturbation(image, strength=0.2, faces_folder=None, face_blend_ratio=1.0):
     """
     Combine multiple techniques de perturbation adversariale.
+    The face swap is independent from the strength parameter.
     """
+    if faces_folder and os.path.isdir(faces_folder):
+        print(f"Applying face swap using images from {faces_folder}")
+        image = apply_face_swap(image, faces_folder, face_index=-1, blend_ratio=face_blend_ratio)
     image = apply_background_focused_perturbation(image, 
                                                strength_subject=strength * 0.01,
                                                strength_background=strength * 2.0)
@@ -566,7 +669,7 @@ def metadata_cleaner(output_path):
     except Exception as e:
         print(f"Error in metadata processing: {e}")
 
-def process_image(filename, input_folder, output_folder, strength):
+def process_image(filename, input_folder, output_folder, strength, faces_folder=None, face_blend_ratio=1.0):
     """
     Processes a single image with adversarial perturbations.
     """
@@ -576,12 +679,12 @@ def process_image(filename, input_folder, output_folder, strength):
     if image is None:
         print(f"Warning: Could not read {input_path}")
         return False
-    perturbed = apply_adversarial_perturbation(image, strength)
+    perturbed = apply_adversarial_perturbation(image, strength, faces_folder, face_blend_ratio)
     cv2.imwrite(output_path, perturbed)
     metadata_cleaner(output_path)
     return True
 
-def process_folder(input_folder, output_folder, strength, batch_size=10):
+def process_folder(input_folder, output_folder, strength, faces_folder=None, face_blend_ratio=1.0, batch_size=10):
     """
     Processes all images in a folder with adversarial perturbations.
     """
@@ -592,7 +695,7 @@ def process_folder(input_folder, output_folder, strength, batch_size=10):
         for i in range(0, len(files), batch_size):
             batch = files[i:i + batch_size]
             for filename in batch:
-                process_image(filename, input_folder, output_folder, strength)
+                process_image(filename, input_folder, output_folder, strength, faces_folder, face_blend_ratio)
                 pbar.update(1)
 
 # --------- MAIN ENTRY POINT ---------
@@ -602,5 +705,7 @@ if __name__ == "__main__":
     parser.add_argument("input_folder", help="Input folder containing images")
     parser.add_argument("output_folder", help="Output folder for perturbed images")
     parser.add_argument("--strength", type=float, default=0.05, help="Strength of perturbation")
+    parser.add_argument("--faces", help="Folder containing faces for face swapping")
+    parser.add_argument("--face-blend", type=float, default=1.0, help="Face swap blend ratio (0.0-1.0)")
     args = parser.parse_args()
-    process_folder(args.input_folder, args.output_folder, args.strength)
+    process_folder(args.input_folder, args.output_folder, args.strength, args.faces, args.face_blend)
