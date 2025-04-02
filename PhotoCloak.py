@@ -548,73 +548,74 @@ def apply_subject_focused_perturbation(image, strength_subject=0.2, strength_bac
     combined_image = cv2.addWeighted(perturbed_subject, 0.7, adjusted_background, 0.3, 0)
     return combined_image
 
-def apply_background_focused_perturbation(image, strength_subject=0.01, strength_background=5.0):
+def apply_background_focused_perturbation(image, strength_subject=0.01, strength_background=5.0, show_outlines=False):
     """
-    Applies strong adversarial perturbations to the background
-    while preserving the subject with minimal modifications.
-    Uses distance-based transition for perfect edge blending.
+    Enhanced perturbation balance with subject outlines option
     """
     mask = detect_subject_sam(image)
     
+    if show_outlines:
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        outline_image = image.copy()
+        cv2.drawContours(outline_image, contours, -1, (0, 0, 255), 2)
+        return outline_image
+
     dist_transform_bg = cv2.distanceTransform(255 - mask, cv2.DIST_L2, 5)
-    
     transition_distance = 20.0
-    
     h, w = image.shape[:2]
     transition_mask = np.ones((h, w), dtype=np.float32)
-    
     transition_mask[mask > 0] = 0.0
-    
     background_area = (mask == 0)
     transition_zone = (dist_transform_bg <= transition_distance) & background_area
-    
+
     if np.any(transition_zone):
         normalized_dist = dist_transform_bg[transition_zone] / transition_distance
         transition_mask[transition_zone] = normalized_dist**3
-    
+
     transition_mask = cv2.GaussianBlur(transition_mask, (5, 5), 0)
-    
     subject = image.copy()
     background = image.copy()
-
-    adjusted_subject = imperceptible_noise(subject, strength=strength_subject * 0.2)
-    
-    perturbed_background = advanced_frequency_domain_attack(background, strength=strength_background * 1.5)
-    perturbed_background = adjust_color_curves(perturbed_background, strength=strength_background * 2.5)
-    perturbed_background = advanced_color_warping(perturbed_background, strength=strength_background * 2.0)
-    
-    noise = np.random.normal(0, strength_background * 15, background.shape[:2])
-    noise = cv2.GaussianBlur(noise, (9, 9), 0)
-    for c in range(3):
-        perturbed_background[:,:,c] = np.clip(perturbed_background[:,:,c] + noise, 0, 255)
-    
+    adjusted_subject = imperceptible_noise(subject, strength=strength_subject * 0.1)
+    adjusted_subject = subtle_geometry_transform(adjusted_subject, strength=strength_subject * 0.05)
+    perturbed_background = advanced_frequency_domain_attack(background, strength=strength_background * 1.0)
+    perturbed_background = adjust_color_curves(perturbed_background, strength=strength_background * 1.5)
+    perturbed_background = advanced_color_warping(perturbed_background, strength=strength_background * 1.2)
+    noise = np.random.normal(0, strength_background * 8, background.shape[:2])
+    noise = cv2.GaussianBlur(noise, (15, 15), 0)
     result = np.zeros_like(image)
+
     for c in range(3):
         result[:,:,c] = (1 - transition_mask) * adjusted_subject[:,:,c] + transition_mask * perturbed_background[:,:,c]
-    
+
     return result.astype(np.uint8)
 
-def apply_adversarial_perturbation(image, strength=0.2, faces_folder=None, face_blend_ratio=1.0):
+def apply_adversarial_perturbation(image, strength=0.2, faces_folder=None, face_blend_ratio=1.0, show_outlines=False):
     """
-    Combine multiple techniques de perturbation adversariale.
-    The face swap is independent from the strength parameter.
+    Combine multiple techniques with reduced subject strength and optional outlines
     """
     if faces_folder and os.path.isdir(faces_folder):
         print(f"Applying face swap using images from {faces_folder}")
         image = apply_face_swap(image, faces_folder, face_index=-1, blend_ratio=face_blend_ratio)
+    
+    if show_outlines:
+        mask = detect_subject_sam(image)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        outline_image = image.copy()
+        cv2.drawContours(outline_image, contours, -1, (0, 0, 255), 2)
+        return outline_image
+
     image = apply_background_focused_perturbation(image, 
-                                               strength_subject=strength * 0.01,
-                                               strength_background=strength * 2.0)
-    
+                                              strength_subject=strength * 0.005,
+                                              strength_background=strength * 2.0)
+
     image = neural_network_adversarial_attack(image, strength=strength*1.5)
-    
     image = perturb_image_descriptors(image, strength=strength*0.3)
     image = advanced_dithering(image, strength=strength*0.2)
     image = subtle_geometry_transform(image, strength=strength*0.15)
     image = dct_domain_perturbation(image, strength=strength*0.25)
-    
+
     image = random_crop_and_resize(image, crop_fraction=0.985)
-    
+
     return image
 
 # --------- UTILITY AND WORKFLOW FUNCTIONS ---------
@@ -669,7 +670,7 @@ def metadata_cleaner(output_path):
     except Exception as e:
         print(f"Error in metadata processing: {e}")
 
-def process_image(filename, input_folder, output_folder, strength, faces_folder=None, face_blend_ratio=1.0):
+def process_image(filename, input_folder, output_folder, strength, faces_folder=None, face_blend_ratio=1.0, show_outlines=False):
     """
     Processes a single image with adversarial perturbations.
     """
@@ -679,12 +680,13 @@ def process_image(filename, input_folder, output_folder, strength, faces_folder=
     if image is None:
         print(f"Warning: Could not read {input_path}")
         return False
-    perturbed = apply_adversarial_perturbation(image, strength, faces_folder, face_blend_ratio)
+    perturbed = apply_adversarial_perturbation(image, strength, faces_folder, face_blend_ratio, show_outlines)
     cv2.imwrite(output_path, perturbed)
-    metadata_cleaner(output_path)
+    if not show_outlines:
+        metadata_cleaner(output_path)
     return True
 
-def process_folder(input_folder, output_folder, strength, faces_folder=None, face_blend_ratio=1.0, batch_size=10):
+def process_folder(input_folder, output_folder, strength, faces_folder=None, face_blend_ratio=1.0, show_outlines=False, batch_size=10):
     """
     Processes all images in a folder with adversarial perturbations.
     """
@@ -695,7 +697,7 @@ def process_folder(input_folder, output_folder, strength, faces_folder=None, fac
         for i in range(0, len(files), batch_size):
             batch = files[i:i + batch_size]
             for filename in batch:
-                process_image(filename, input_folder, output_folder, strength, faces_folder, face_blend_ratio)
+                process_image(filename, input_folder, output_folder, strength, faces_folder, face_blend_ratio, show_outlines)
                 pbar.update(1)
 
 # --------- MAIN ENTRY POINT ---------
@@ -707,5 +709,6 @@ if __name__ == "__main__":
     parser.add_argument("--strength", type=float, default=0.05, help="Strength of perturbation")
     parser.add_argument("--faces", help="Folder containing faces for face swapping")
     parser.add_argument("--face-blend", type=float, default=1.0, help="Face swap blend ratio (0.0-1.0)")
+    parser.add_argument("--outlines", action="store_true", help="Show detected subject outlines instead of perturbation")
     args = parser.parse_args()
-    process_folder(args.input_folder, args.output_folder, args.strength, args.faces, args.face_blend)
+    process_folder(args.input_folder, args.output_folder, args.strength, args.faces, args.face_blend, args.outlines)
