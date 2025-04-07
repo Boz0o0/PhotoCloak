@@ -49,9 +49,9 @@ python PhotoCloak.py input_folder/file output_folder/file --strength 0.1
 Different types of images may require different strength levels:
 
 - **0.01-0.05**: Minimal protection with excellent visual quality, but not very effective at fooling AI systems and algorithms
-- **0.05-0.1**: Balanced protection for personal photos (moderately effective)
-- **0.1-0.2**: Strong protection for sensitive images (highly effective)
-- **0.3+**: Maximum protection (almost 100% effective against most AI systems) with big visible quality trade-offs
+- **0.05-0.1**: Low protection for personal photos (A bit effective)
+- **0.1-0.2**: Balanced protection for sensitive images (Moderately effective, depends on the popularity of the picture online)
+- **0.3+**: High protection (almost 100% effective against most AI systems) with big visible quality trade-offs
 
 ## EXIF Data Management
 
